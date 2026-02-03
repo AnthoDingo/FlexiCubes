@@ -14,7 +14,30 @@
 # limitations under the License.
 import torch
 from .tables import *
-from kaolin.utils.testing import check_tensor
+
+# Remplacement local de check_tensor (kaolin n'est pas compatible avec PyTorch 2.9.1)
+def check_tensor(tensor, shape, throw=False):
+    """Simple tensor shape validation function (replaces kaolin.utils.testing.check_tensor)"""
+    if tensor is None:
+        if throw:
+            raise ValueError(f"Expected tensor, got None")
+        return False
+    if not isinstance(tensor, torch.Tensor):
+        if throw:
+            raise TypeError(f"Expected torch.Tensor, got {type(tensor)}")
+        return False
+    if shape is not None:
+        expected_ndim = len(shape)
+        if tensor.ndim != expected_ndim:
+            if throw:
+                raise ValueError(f"Expected {expected_ndim}D tensor, got {tensor.ndim}D")
+            return False
+        for i, s in enumerate(shape):
+            if s is not None and tensor.shape[i] != s:
+                if throw:
+                    raise ValueError(f"Expected shape {shape}, got {tensor.shape}")
+                return False
+    return True
 
 __all__ = [
     'FlexiCubes'
@@ -25,36 +48,58 @@ class FlexiCubes:
     def __init__(self, device="cuda"):
 
         self.device = device
-        self.dmc_table = torch.tensor(dmc_table, dtype=torch.long, device=device, requires_grad=False)
+        self.dmc_table = torch.tensor(dmc_table, dtype=torch.int32, device=device, requires_grad=False)
         self.num_vd_table = torch.tensor(num_vd_table,
-                                         dtype=torch.long, device=device, requires_grad=False)
+                                         dtype=torch.int32, device=device, requires_grad=False)
         self.check_table = torch.tensor(
             check_table,
-            dtype=torch.long, device=device, requires_grad=False)
+            dtype=torch.int32, device=device, requires_grad=False)
 
-        self.tet_table = torch.tensor(tet_table, dtype=torch.long, device=device, requires_grad=False)
-        self.quad_split_1 = torch.tensor([0, 1, 2, 0, 2, 3], dtype=torch.long, device=device, requires_grad=False)
-        self.quad_split_2 = torch.tensor([0, 1, 3, 3, 1, 2], dtype=torch.long, device=device, requires_grad=False)
+        self.tet_table = torch.tensor(tet_table, dtype=torch.int32, device=device, requires_grad=False)
+        self.quad_split_1 = torch.tensor([0, 1, 2, 0, 2, 3], dtype=torch.int32, device=device, requires_grad=False)
+        self.quad_split_2 = torch.tensor([0, 1, 3, 3, 1, 2], dtype=torch.int32, device=device, requires_grad=False)
         self.quad_split_train = torch.tensor(
-            [0, 1, 1, 2, 2, 3, 3, 0], dtype=torch.long, device=device, requires_grad=False)
+            [0, 1, 1, 2, 2, 3, 3, 0], dtype=torch.int32, device=device, requires_grad=False)
 
         self.cube_corners = torch.tensor([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [
                                          1, 0, 1], [0, 1, 1], [1, 1, 1]], dtype=torch.float, device=device)
-        self.cube_corners_idx = torch.pow(2, torch.arange(8, requires_grad=False))
+        self.cube_corners_idx = torch.pow(2, torch.arange(8, dtype=torch.int32, requires_grad=False))
         self.cube_edges = torch.tensor([0, 1, 1, 5, 4, 5, 0, 4, 2, 3, 3, 7, 6, 7, 2, 6,
-                                       2, 0, 3, 1, 7, 5, 6, 4], dtype=torch.long, device=device, requires_grad=False)
+                                       2, 0, 3, 1, 7, 5, 6, 4], dtype=torch.int32, device=device, requires_grad=False)
 
         self.edge_dir_table = torch.tensor([0, 2, 0, 2, 0, 2, 0, 2, 1, 1, 1, 1],
-                                           dtype=torch.long, device=device)
+                                           dtype=torch.int32, device=device)
         self.dir_faces_table = torch.tensor([
             [[5, 4], [3, 2], [4, 5], [2, 3]],
             [[5, 4], [1, 0], [4, 5], [0, 1]],
             [[3, 2], [1, 0], [2, 3], [0, 1]]
-        ], dtype=torch.long, device=device)
-        self.adj_pairs = torch.tensor([0, 1, 1, 3, 3, 2, 2, 0], dtype=torch.long, device=device)
+        ], dtype=torch.int32, device=device)
+        self.adj_pairs = torch.tensor([0, 1, 1, 3, 3, 2, 2, 0], dtype=torch.int32, device=device)
 
     def __call__(self, voxelgrid_vertices, scalar_field, cube_idx, resolution, qef_reg_scale=1e-3,
-                 weight_scale=0.99, beta=None, alpha=None, gamma_f=None, voxelgrid_colors=None, training=False):
+                 weight_scale=0.99, beta=None, alpha=None, gamma_f=None, voxelgrid_colors=None, training=False, dtype=None):
+        """
+        Optionally specify 'dtype' to unify all float inputs (e.g. torch.float16).
+        If 'dtype' is None, we infer from voxelgrid_vertices or default to float32.
+        """
+        # unify floating tensors to a chosen dtype, so it can work with half, etc:
+        if dtype is None:
+            if voxelgrid_vertices.dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+                dtype = voxelgrid_vertices.dtype
+            else:
+                dtype = torch.float32
+        #cast all to dtype, so that it works with half-precision:
+        voxelgrid_vertices = voxelgrid_vertices.to(dtype)  # Cast the geometry to the chosen dtype
+        scalar_field = scalar_field.to(dtype)
+        if beta is not None:
+            beta = beta.to(dtype)
+        if alpha is not None:
+            alpha = alpha.to(dtype)
+        if gamma_f is not None:
+            gamma_f = gamma_f.to(dtype)
+        if voxelgrid_colors is not None:
+            voxelgrid_colors = voxelgrid_colors.to(dtype)
+
         assert torch.is_tensor(voxelgrid_vertices) and \
             check_tensor(voxelgrid_vertices, (None, 3), throw=False), \
             "'voxelgrid_vertices' should be a tensor of shape (num_vertices, 3)"
@@ -82,10 +127,10 @@ class FlexiCubes:
         surf_cubes, occ_fx8 = self._identify_surf_cubes(scalar_field, cube_idx)
         if surf_cubes.sum() == 0:
             return (
-                torch.zeros((0, 3), device=self.device),
-                torch.zeros((0, 3), dtype=torch.long, device=self.device),
-                torch.zeros((0), device=self.device),
-                torch.zeros((0, voxelgrid_colors.shape[-1]), device=self.device) if voxelgrid_colors is not None else None
+                torch.zeros((0, 3), device=self.device, dtype=dtype),
+                torch.zeros((0, 3), dtype=torch.int32, device=self.device),
+                torch.zeros((0), device=self.device, dtype=dtype),
+                torch.zeros((0, voxelgrid_colors.shape[-1]), device=self.device, dtype=dtype) if voxelgrid_colors is not None else None
             )
         beta, alpha, gamma_f = self._normalize_weights(
             beta, alpha, gamma_f, surf_cubes, weight_scale)
@@ -147,7 +192,9 @@ class FlexiCubes:
         ambiguity in the Dual Marching Cubes (DMC) configurations as described in Section 1.3 of the 
         supplementary material. It should be noted that this function assumes a regular grid.
         """
-        case_ids = (occ_fx8[surf_cubes] * self.cube_corners_idx.to(self.device).unsqueeze(0)).sum(-1)
+        occ_int = occ_fx8[surf_cubes].to(torch.int32)  # Convert boolean to int32
+        corners_idx = self.cube_corners_idx.to(self.device).unsqueeze(0)
+        case_ids = (occ_int * corners_idx).sum(-1, dtype=torch.int32) #int32 else sum defaults to int64 by default
 
         problem_config = self.check_table.to(self.device)[case_ids]
         to_check = problem_config[..., 0] == 1
@@ -158,7 +205,7 @@ class FlexiCubes:
         # The 'problematic_configs' only contain configurations for surface cubes. Next, we construct a 3D array,
         # 'problem_config_full', to store configurations for all cubes (with default config for non-surface cubes).
         # This allows efficient checking on adjacent cubes.
-        problem_config_full = torch.zeros(list(res) + [5], device=self.device, dtype=torch.long)
+        problem_config_full = torch.zeros(list(res) + [5], device=self.device, dtype=torch.int32)
         vol_idx = torch.nonzero(problem_config_full[..., 0] == 0)  # N, 3
         vol_idx_problem = vol_idx[surf_cubes][to_check]
         problem_config_full[vol_idx_problem[..., 0], vol_idx_problem[..., 1], vol_idx_problem[..., 2]] = problem_config
@@ -179,7 +226,7 @@ class FlexiCubes:
                                                  vol_idx_problem_adj[..., 1], vol_idx_problem_adj[..., 2]]
         # If two cubes with cases C16 and C19 share an ambiguous face, both cases are inverted.
         to_invert = (problem_config_adj[..., 0] == 1)
-        idx = torch.arange(case_ids.shape[0], device=self.device)[to_check][within_range][to_invert]
+        idx = torch.arange(case_ids.shape[0], dtype=torch.int32, device=self.device)[to_check][within_range][to_invert]
         case_ids.index_put_((idx,), problem_config[to_invert][..., -1])
         return case_ids
 
@@ -194,14 +241,14 @@ class FlexiCubes:
         all_edges = cube_idx[surf_cubes][:, self.cube_edges].reshape(-1, 2)
         unique_edges, _idx_map, counts = torch.unique(all_edges, dim=0, return_inverse=True, return_counts=True)
 
-        unique_edges = unique_edges.long()
+        unique_edges = unique_edges.int()
         mask_edges = occ_n[unique_edges.reshape(-1)].reshape(-1, 2).sum(-1) == 1
 
         surf_edges_mask = mask_edges[_idx_map]
         counts = counts[_idx_map]
 
-        mapping = torch.ones((unique_edges.shape[0]), dtype=torch.long, device=cube_idx.device) * -1
-        mapping[mask_edges] = torch.arange(mask_edges.sum(), device=cube_idx.device)
+        mapping = torch.ones((unique_edges.shape[0]), dtype=torch.int32, device=cube_idx.device) * -1
+        mapping[mask_edges] = torch.arange(mask_edges.sum(), dtype=torch.int32, device=cube_idx.device) #int32 else arrange defaults to int64
         # Shaped as [number of cubes x 12 edges per cube]. This is later used to map a cube edge to the unique index
         # for a surface-intersecting edge. Non-surface-intersecting edges are marked with -1.
         idx_map = mapping[_idx_map]
@@ -260,6 +307,9 @@ class FlexiCubes:
         if voxelgrid_colors is not None:
             C = voxelgrid_colors.shape[-1]
             surf_edges_c = torch.index_select(input=voxelgrid_colors, index=surf_edges.reshape(-1), dim=0).reshape(-1, 2, C)
+        else:
+            C = None
+            surf_edges_c = None
 
         idx_map = idx_map.reshape(-1, 12)
         num_vd = torch.index_select(input=self.num_vd_table, index=case_ids, dim=0)
@@ -269,7 +319,7 @@ class FlexiCubes:
         #     vd_color = []
 
         total_num_vd = 0
-        vd_idx_map = torch.zeros((case_ids.shape[0], 12), dtype=torch.long, device=self.device, requires_grad=False)
+        vd_idx_map = torch.zeros((case_ids.shape[0], 12), dtype=torch.int64, device=self.device, requires_grad=False)
 
         for num in torch.unique(num_vd):
             cur_cubes = (num_vd == num)  # consider cubes with the same numbers of vd emitted (for batching)
@@ -300,8 +350,8 @@ class FlexiCubes:
         # else:
         #     vd_color = None
 
-        vd = torch.zeros((total_num_vd, 3), device=self.device)
-        beta_sum = torch.zeros((total_num_vd, 1), device=self.device)
+        vd = torch.zeros((total_num_vd, 3), device=self.device, dtype=beta.dtype)#dtype so that it works with half-precision
+        beta_sum = torch.zeros((total_num_vd, 1), device=self.device, dtype=beta.dtype)#dtype so that it works with half
 
         idx_group = torch.gather(input=idx_map.reshape(-1), dim=0, index=edge_group_to_cube * 12 + edge_group)
 
@@ -324,8 +374,8 @@ class FlexiCubes:
         '''
         interpolate colors use the same method as dual vertices
         '''
-        if voxelgrid_colors is not None:
-            vd_color = torch.zeros((total_num_vd, C), device=self.device)
+        if voxelgrid_colors is not None and surf_edges_c is not None:
+            vd_color = torch.zeros((total_num_vd, C), device=self.device, dtype=beta.dtype)
             c_group = torch.index_select(input=surf_edges_c, index=idx_group.reshape(-1), dim=0).reshape(-1, 2, C)
             uc_group = self._linear_interp(s_group * alpha_group, c_group)
             vd_color = vd_color.index_add_(0, index=edge_group_to_vd, source=uc_group * beta_group) / beta_sum
@@ -334,7 +384,7 @@ class FlexiCubes:
         
         L_dev = self._compute_reg_loss(vd, zero_crossing_group, edge_group_to_vd, vd_num_edges)
 
-        v_idx = torch.arange(vd.shape[0], device=self.device)  # + total_num_vd
+        v_idx = torch.arange(vd.shape[0], dtype=torch.int64, device=self.device)  # + total_num_vd
 
         vd_idx_map = (vd_idx_map.reshape(-1)).scatter(dim=0, index=edge_group_to_cube *
                                                       12 + edge_group, src=v_idx[edge_group_to_vd])
@@ -351,7 +401,8 @@ class FlexiCubes:
             group = idx_map.reshape(-1)[group_mask]
             vd_idx = vd_idx_map[group_mask]
             edge_indices, indices = torch.sort(group, stable=True)
-            quad_vd_idx = vd_idx[indices].reshape(-1, 4)
+            indices = indices.to(torch.int32)
+            quad_vd_idx = vd_idx[indices].reshape(-1, 4).to(torch.int32)
 
             # Ensure all face directions point towards the positive SDF to maintain consistent winding.
             s_edges = scalar_field[surf_edges[edge_indices.reshape(-1, 4)[:, 0]].reshape(-1)].reshape(-1, 2)
@@ -364,7 +415,7 @@ class FlexiCubes:
         gamma_13 = quad_gamma[:, 1] * quad_gamma[:, 3]
         if not training:
             mask = (gamma_02 > gamma_13)
-            faces = torch.zeros((quad_gamma.shape[0], 6), dtype=torch.long, device=quad_vd_idx.device)
+            faces = torch.zeros((quad_gamma.shape[0], 6), dtype=torch.int32, device=quad_vd_idx.device)
             faces[mask] = quad_vd_idx[mask][:, self.quad_split_1]
             faces[~mask] = quad_vd_idx[~mask][:, self.quad_split_2]
             faces = faces.reshape(-1, 3)
